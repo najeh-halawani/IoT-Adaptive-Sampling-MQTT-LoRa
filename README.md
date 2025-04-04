@@ -78,6 +78,7 @@ const char* mqtt_topic_fft_analysis = "white/sensor/fft_analysis";
 ```
 
 ### LoRaWAN Configuration
+![TTN](https://github.com/najeh-halawani/IoT-Adaptive-Sampling-MQTT-LoRa/blob/main/esp32-ttn.png)
 
 Update the following parameters for LoRaWAN connectivity:
 ```cpp
@@ -157,9 +158,6 @@ typedef struct {
 - `performanceMonitorTask()`: Tracks data efficiency and resource usage.
 
 ## LoRaWAN Events
-
-![TTN](https://github.com/najeh-halawani/IoT-Adaptive-Sampling-MQTT-LoRa/blob/main/esp32-ttn.png)
-
 The firmware handles multiple LoRaWAN events, including:
 
 - `EV_JOINING`: Joining the network
