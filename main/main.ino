@@ -5,6 +5,8 @@
 #include <esp_sleep.h>
 
 // WiFi and MQTT Configurations
+// const char* ssid = "whitex";
+// const char* password = "whitewhite";
 const char* ssid = "Najeh's S25 Ultra";
 const char* password = "white1xx";
 const char* mqtt_server = "test.mosquitto.org";
@@ -17,8 +19,9 @@ const int mqtt_port = 1883;
 // Queue and timing structures
 QueueHandle_t sensorQueue;     // Queue for passing sensor data between tasks
 QueueHandle_t timestampQueue;  // Queue for passing timestamps
-#define QUEUE_SIZE 500         // Increased queue capacity
+#define QUEUE_SIZE 200         // Increased queue capacity
 #define WINDOW_SIZE_SECONDS 5  // 5-second window as per assignment
+// #define SAMPLES 128                // Increased FFT samples for better resolution
 #define SAMPLES 512
 #define MIN_SAMPLING_FREQUENCY 10  // Minimum sampling frequency (Hz)
 
@@ -44,14 +47,12 @@ unsigned long totalSamplesCollected = 0;
 unsigned long dataBytesTransmitted = 0;
 
 // Energy and performance metrics
-unsigned long originalEnergyConsumption = 0;  // Using sample count as proxy for energy
-unsigned long adaptiveEnergyConsumption = 0;
+double originalEnergyConsumption = 0;  // Using sample count as proxy for energy
+double adaptiveEnergyConsumption = 0;
+unsigned long originalDataVolume = 0;
+unsigned long adaptiveDataVolume = 0;
 unsigned long latencyMeasurements = 0;
 unsigned long totalLatency = 0;
-
-// Variables to track highest signal frequency detected
-double highestFrequencyDetected = 0;
-bool firstFFTDone = false;
 
 ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, SAMPLES, samplingFrequency);
 
@@ -65,7 +66,7 @@ void setupADC();
 void sensorTask(void* pvParameters);
 void simulateSensorTask(void* pvParameters);  // Added for signal simulation
 void averageTask(void* pvParameters);
-void transmitToEdgeServer(double average, unsigned long timestamp, int sampleCount);
+void transmitToEdgeServer(double average, unsigned long timestamp);
 void fftTask(void* pvParameters);
 void adjustSamplingFrequency(double dominantFrequency);
 void checkWiFiConnection();
@@ -102,15 +103,13 @@ void setup() {
 
   // Calculate and set max frequency
   int measuredMaxFreq = sampleCount;
-  MAX_SAMPLING_FREQUENCY = (measuredMaxFreq > 1000) ? 1000 : measuredMaxFreq;  // Cap at 1kHz
+  // MAX_SAMPLING_FREQUENCY = (measuredMaxFreq > 1000) ? 1000 : measuredMaxFreq;  // Cap at 1kHz
+  MAX_SAMPLING_FREQUENCY = sampleCount;
 
   Serial.print("Measured maximum sampling frequency: ");
   Serial.print(measuredMaxFreq);
   Serial.println(" Hz");
 
-  // Set initial sampling frequency to maximum for baseline measurements
-  samplingFrequency = MAX_SAMPLING_FREQUENCY;
-  
   // Create tasks
   xTaskCreate(simulateSensorTask, "Simulated Sensor", 4096, NULL, 3, NULL);
   xTaskCreate(averageTask, "Average Calculator", 4096, NULL, 2, NULL);
@@ -155,12 +154,6 @@ void simulateSensorTask(void* pvParameters) {
   double sensorValue;
   unsigned long timestamp;
   TickType_t delayPeriod;
-  
-  // Theoretical maximum frequency based on Nyquist for known signal frequencies
-  double theoreticalMaxFreq = 2.2 * max(frequency1, frequency2);
-  unsigned long baselineStartTime = millis();
-  bool baselinePeriodActive = true;
-  const unsigned long BASELINE_PERIOD_MS = 30000; // 30 seconds baseline period
 
   while (true) {
     // Calculate delay based on current sampling frequency
@@ -181,20 +174,15 @@ void simulateSensorTask(void* pvParameters) {
 
     // Track metrics
     totalSamplesCollected++;
-    
-    // Track energy consumption based on current mode
-    // During baseline period or when using maximum sampling frequency, count as original
-    if (baselinePeriodActive || !firstFFTDone || samplingFrequency >= MAX_SAMPLING_FREQUENCY) {
+
+    // Serial.println("----------------------");
+    // Serial.println(samplingFrequency);
+    // Serial.println("----------------------");
+
+    if (samplingFrequency == MAX_SAMPLING_FREQUENCY) {
       originalEnergyConsumption++;
     } else {
-      // Using adaptive sampling after first FFT
       adaptiveEnergyConsumption++;
-    }
-    
-    // End baseline period after set time
-    if (baselinePeriodActive && (millis() - baselineStartTime > BASELINE_PERIOD_MS)) {
-      baselinePeriodActive = false;
-      Serial.println("Baseline period complete, switching to adaptive sampling");
     }
 
     // Delay until next sample
@@ -227,8 +215,11 @@ void sensorTask(void* pvParameters) {
 
     // Track metrics
     totalSamplesCollected++;
-    
-    // Energy consumption tracking logic would be the same as in simulateSensorTask
+    if (samplingFrequency == MAX_SAMPLING_FREQUENCY) {
+      originalEnergyConsumption++;
+    } else {
+      adaptiveEnergyConsumption++;
+    }
 
     // Delay until next sample
     vTaskDelay(delayPeriod);
@@ -238,7 +229,7 @@ void sensorTask(void* pvParameters) {
 // FFT task to analyze the signal frequency and adjust sampling rate
 void fftTask(void* pvParameters) {
   // Wait for some samples to be collected first
-  vTaskDelay(pdMS_TO_TICKS(5000));
+  vTaskDelay(pdMS_TO_TICKS(1000));
 
   while (true) {
     // Collect SAMPLES data points for FFT
@@ -273,34 +264,12 @@ void fftTask(void* pvParameters) {
     // Find dominant frequency
     double dominantFrequency = FFT.majorPeak(vReal, SAMPLES, currentSamplingFreq);
 
-    // Update highest detected frequency if needed
-    if (dominantFrequency > highestFrequencyDetected) {
-      highestFrequencyDetected = dominantFrequency;
-    }
-
     Serial.print("FFT Analysis - Dominant Frequency: ");
     Serial.print(dominantFrequency, 2);
     Serial.println(" Hz");
-    
-    Serial.print("Highest Frequency Detected: ");
-    Serial.print(highestFrequencyDetected, 2);
-    Serial.println(" Hz");
-
-    // Mark first FFT as complete
-    if (!firstFFTDone) {
-      firstFFTDone = true;
-    }
 
     // Adjust sampling frequency based on dominant frequency
     adjustSamplingFrequency(dominantFrequency);
-    
-    // Publish FFT results to MQTT
-    if (client.connected()) {
-      char fftMsg[128];
-      sprintf(fftMsg, "{\"dominant_freq\":%.2f,\"highest_freq\":%.2f,\"optimal_sampling_freq\":%d}",
-              dominantFrequency, highestFrequencyDetected, optimalSamplingFrequency);
-      client.publish("whitex/sensor/fft_analysis", fftMsg);
-    }
 
     // Run FFT every 5 seconds
     vTaskDelay(pdMS_TO_TICKS(5000));
@@ -314,7 +283,7 @@ void adjustSamplingFrequency(double dominantFrequency) {
     // Apply Nyquist theorem (2x highest frequency) with safety margin
     optimalSamplingFrequency = ceil(2.2 * dominantFrequency);
 
-    // Ensure frequency stays within bounds
+    // Ensure frequency stays within bounds - fix the type mismatch
     optimalSamplingFrequency = max(optimalSamplingFrequency, (int)MIN_SAMPLING_FREQUENCY);
     optimalSamplingFrequency = min(optimalSamplingFrequency, MAX_SAMPLING_FREQUENCY);
 
@@ -392,7 +361,7 @@ void averageTask(void* pvParameters) {
         Serial.println(" samples)");
 
         // Transmit to edge server
-        transmitToEdgeServer(average, timestamp, count);
+        transmitToEdgeServer(average, timestamp);
 
         // Reset for next window
         windowStartTime = timestamp;
@@ -405,7 +374,7 @@ void averageTask(void* pvParameters) {
 }
 
 // Function to transmit data to the edge server via MQTT
-void transmitToEdgeServer(double average, unsigned long timestamp, int sampleCount) {
+void transmitToEdgeServer(double average, unsigned long timestamp) {
   if (!client.connected()) {
     Serial.println("MQTT disconnected. Attempting reconnection...");
     setupMQTT();
@@ -416,21 +385,21 @@ void transmitToEdgeServer(double average, unsigned long timestamp, int sampleCou
   }
 
   // Create JSON message with average, timestamp, and sampling frequency info
-  char msg[192];
-  sprintf(msg, "{\"average\":%.2f,\"timestamp\":%lu,\"sampling_freq\":%d,\"window_size\":%d,\"sample_count\":%d}",
-          average, timestamp, samplingFrequency, WINDOW_SIZE_SECONDS, sampleCount);
+  char msg[128];
+  sprintf(msg, "{\"average\":%.2f,\"timestamp\":%lu,\"sampling_freq\":%d,\"window_size\":%d}",
+          average, timestamp, samplingFrequency, WINDOW_SIZE_SECONDS);
 
   // Record start time for latency calculation
   unsigned long startTime = millis();
   
-  // Publish values for chart visualization
+  
   char buffer[10];                 
   dtostrf(average, 6, 2, buffer);  
+  // Publish to MQTT topic
   if (!client.publish("whitex/sensor/averageChart", buffer)) {
     Serial.println("Failed to publish Average Chart Value");
-  }
-  
-  // Publish to MQTT topic with full data
+  } 
+  // Publish to MQTT topic
   if (client.publish("whitex/sensor/average", msg)) {
     // Message was published successfully
     unsigned long endTime = millis();
@@ -448,6 +417,12 @@ void transmitToEdgeServer(double average, unsigned long timestamp, int sampleCou
     Serial.print(latency);
     Serial.println(" ms");
 
+    // Track data volume metrics
+    if (samplingFrequency == MAX_SAMPLING_FREQUENCY) {
+      originalDataVolume += strlen(msg);
+    } else {
+      adaptiveDataVolume += strlen(msg);
+    }
   } else {
     Serial.println("Failed to publish message");
   }
@@ -461,8 +436,19 @@ void metricsTask(void* pvParameters) {
   while (true) {
     // Calculate metrics
     double energySavingPercentage = 0;
+    // Serial.println("++++++++++++++++++++++++++++++++++++");
+    // Serial.println(originalEnergyConsumption);
+    // Serial.println("++++++++++++++++++++++++++++++++++++");
     if (originalEnergyConsumption > 0) {
       energySavingPercentage = 100.0 * (1.0 - (double)adaptiveEnergyConsumption / originalEnergyConsumption);
+    }
+
+    double dataReductionPercentage = 0;
+    // Serial.println("++++++++++++++++++++++++++++++++++++");
+    // Serial.println(originalDataVolume);
+    // Serial.println("++++++++++++++++++++++++++++++++++++");
+    if (originalDataVolume > 0) {
+      dataReductionPercentage = 100.0 * (1.0 - (double)adaptiveDataVolume / originalDataVolume);
     }
 
     double avgLatency = 0;
@@ -470,23 +456,18 @@ void metricsTask(void* pvParameters) {
       avgLatency = (double)totalLatency / latencyMeasurements;
     }
 
-    // Calculate theoretical optimal sampling frequency based on Nyquist
-    double theoreticalOptimalFreq = 2.2 * max(frequency1, frequency2);
-    
     // Print metrics report
     Serial.println("\n--- System Metrics Report ---");
     Serial.print("Current Sampling Frequency: ");
     Serial.print(samplingFrequency);
     Serial.println(" Hz");
-    
-    Serial.print("Original Energy Consumption: ");
-    Serial.println(originalEnergyConsumption);
-    
-    Serial.print("Adaptive Energy Consumption: ");
-    Serial.println(adaptiveEnergyConsumption);
 
     Serial.print("Energy Savings: ");
     Serial.print(energySavingPercentage, 2);
+    Serial.println("%");
+
+    Serial.print("Data Volume Reduction: ");
+    Serial.print(dataReductionPercentage, 2);
     Serial.println("%");
 
     Serial.print("Average End-to-End Latency: ");
@@ -499,38 +480,20 @@ void metricsTask(void* pvParameters) {
     Serial.print("Total Data Transmitted: ");
     Serial.print(dataBytesTransmitted);
     Serial.println(" bytes");
-    
-    Serial.print("Highest Signal Frequency Detected: ");
-    Serial.print(highestFrequencyDetected);
-    Serial.println(" Hz");
-    
-    Serial.print("Theoretical Optimal Sampling Frequency: ");
-    Serial.print(theoreticalOptimalFreq);
-    Serial.println(" Hz");
-    
-    Serial.print("Current Optimal Sampling Frequency: ");
-    Serial.print(optimalSamplingFrequency);
-    Serial.println(" Hz");
-    
     Serial.println("------------------------\n");
 
     // Send metrics to server
     if (client.connected()) {
-      char metricsMsg[512];
+      char metricsMsg[256];
       sprintf(metricsMsg,
-              "{\"energy_savings\":%.2f,\"avg_latency\":%.2f,"
-              "\"sampling_freq\":%d,\"total_samples\":%lu,\"data_transmitted\":%lu,"
-              "\"original_energy\":%lu,\"adaptive_energy\":%lu,"
-              "\"highest_freq\":%.2f,\"theoretical_optimal_freq\":%.2f}",
-              energySavingPercentage, avgLatency, 
-              samplingFrequency, totalSamplesCollected, dataBytesTransmitted,
-              originalEnergyConsumption, adaptiveEnergyConsumption,
-              highestFrequencyDetected, theoreticalOptimalFreq);
+              "{\"energy_savings\":%.2f,\"data_reduction\":%.2f,\"avg_latency\":%.2f,\"sampling_freq\":%d,\"total_samples\":%d,\"data_transmitted\":%d}",
+              energySavingPercentage, dataReductionPercentage, avgLatency, samplingFrequency, totalSamplesCollected, dataBytesTransmitted);
 
       client.publish("whitex/sensor/metrics", metricsMsg);
     }
 
-    // Report every 5 seconds
+    // Report every minute
+    // vTaskDelay(pdMS_TO_TICKS(60000));
     vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
