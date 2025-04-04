@@ -17,12 +17,11 @@ const int mqtt_port = 1883;
 // Queue and timing structures
 QueueHandle_t sensorQueue;     // Queue for passing sensor data between tasks
 QueueHandle_t timestampQueue;  // Queue for passing timestamps
-#define QUEUE_SIZE 500         // Increased queue capacity
+#define QUEUE_SIZE 500         
 #define WINDOW_SIZE_SECONDS 5  // 5-second window as per assignment
 #define SAMPLES 512
 #define MIN_SAMPLING_FREQUENCY 10  // Minimum sampling frequency (Hz)
 
-// Define as variable, not constant, so it can be updated
 int MAX_SAMPLING_FREQUENCY = 1000;  // Initial max value, will be measured in setup()
 
 // Signal parameters for testing - simulating a_k*sin(f_k)
@@ -602,3 +601,28 @@ void checkMQTTConnection() {
     }
   }
 }
+
+
+
+// LORAWAN
+
+// uint8_t devEui[] = { 0x20, 0x43, 0x00, 0xD8, 0x7E, 0xD5, 0xB3, 0x70 };
+// uint8_t appEui[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+// uint8_t appKey[] = { 0xC1, 0xB6, 0x11, 0x8A, 0x60, 0x07, 0xE7, 0x22, 0xDD, 0x5D, 0x9C, 0xAD, 0x92, 0x9F, 0x7D, 0x2D };
+
+// uint8_t nwkSKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00 };
+// uint8_t appSKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,0x00 };
+// uint32_t devAddr =  ( uint32_t )0x00000000;
+
+
+// /* Channels mask */
+// uint16_t userChannelsMask[6] = {0x00FF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000}; // default EU868 channels mask
+
+// LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
+// DeviceClass_t loraWanClass    = CLASS_A;
+// uint32_t appTxDutyCycle       = 15000;
+// bool overTheAirActivation     = true;
+// bool loraWanAdr               = true;
+// bool isTxConfirmed            = true;
+// uint8_t appPort               = 2;
+// uint8_t confirmedNbTrials     = 5; 
