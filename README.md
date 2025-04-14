@@ -22,6 +22,8 @@ This Project describes an ESP32-based application for sampling sensor data, perf
     - [Prerequisites](#prerequisites)
     - [Step-by-Step Setup](#step-by-step-setup)
     - [Setting Up LoRaWAN with TTN](#setting-up-lorawan-with-ttn)
+    - [Setting up AWS IoT Core](#setting-up-aws-iot-core)
+    - [Successful Connection with AWS IoT Core:](#successful-connection-with-aws-iot-core)
     - [Troubleshooting](#troubleshooting)
 
 ## Overview
@@ -417,13 +419,48 @@ The current code uses WiFi/MQTT, but you can register a device in The Things Net
      - LoRaWAN version: 1.0.2.
    - Save.
    - Screenshot:
-     ![TTN Setup](esp32-ttn.png)
+     
+     ![TTN Setup](/images/esp32-ttn.png)
+
      *Figure: TTN Console showing device registration with DevEUI, AppEUI, and AppKey.*
+
+### Setting up AWS IoT Core
+
+1. Create AWS Account
+2. Create an API Key on The Things Stack 
+
+![Create API Key on The Things Stack](/images/create-api-key.png)
+
+3. Use the deployment guide from: ([Deployment Guide](https://www.thethingsindustries.com/docs/integrations/cloud-integrations/aws-iot/deployment-guide/))
+4. Select your AWS region 
+
+![Select AWS Region](/images/aws-select-region.png)
+
+5. Complete the Cloud Formation Stack Form
+
+![CLoud Formation Template](/images/cloud-formation.png)
+
+6. Make sure to add your tenan and cluster region based on your The Things Stack application
+
+![CLoud Formation Template](/images/aws-tenant-cluster.png)
+
+### Successful Connection with AWS IoT Core: 
+
+![AWS IoT Core](/images/AWS-LoraWAN-Connection.png)
+
+*Figure: Successful Connection between Esp32 and IoT Core Service on AWS using TTN.*
+
+![AWS IoT Core - MQTT](/images/AWS-MQTT-Sub.png)
+
+*Figure: Successful MQTT Connection between Esp32 and IoT Core Service on AWS using TTN.*
+
+
 
 ### Troubleshooting
 - **Serial**: Check 115200 baud, port.
 - **WiFi**: Verify SSID/password.
 - **MQTT**: Ping broker, check topic.
 - **Grafana**: Confirm MQTT source, topic.
+- **AWS IoT Core**: Check application-id and its corresponding api key.
 - **TTN**: Ensure gateway, correct keys.
 
