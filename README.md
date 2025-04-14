@@ -1,9 +1,9 @@
-﻿# ESP32 Adaptive Sampling using FFT with MQTT & LoRaWAN
+﻿# ESP32 Adaptive Sampling using FFT with MQTT, Wifi/LoRaWAN & AWS IoT Core
 
 This Project describes an ESP32-based application for sampling sensor data, performing Fast Fourier Transform (FFT) analysis, aggregating statistical metrics, publishing results via MQTT, and monitoring system performance. Built with FreeRTOS for task management, it optimizes resource usage and employs deep sleep for power efficiency. The application is designed for IoT use cases like signal analysis or environmental monitoring, with support for visualization in Grafana, sending data to MQTT broker using Wifi and using LoRaWAN via The Things Network (TTN).
 
 ## Table of Contents
-- [ESP32 Adaptive Sampling using FFT with MQTT \& LoRaWAN](#esp32-adaptive-sampling-using-fft-with-mqtt--lorawan)
+- [ESP32 Adaptive Sampling using FFT with MQTT, Wifi/LoRaWAN \& AWS IoT Core](#esp32-adaptive-sampling-using-fft-with-mqtt-wifilorawan--aws-iot-core)
   - [Table of Contents](#table-of-contents)
   - [Overview](#overview)
   - [What the Code Does](#what-the-code-does)
