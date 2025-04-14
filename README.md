@@ -417,7 +417,7 @@ The current code uses WiFi/MQTT, but you can register a device in The Things Net
      - LoRaWAN version: 1.0.2.
    - Save.
    - Screenshot:
-     ![TTN Setup](docs/ttn_setup.png)
+     ![TTN Setup](esp32-ttn.png)
      *Figure: TTN Console showing device registration with DevEUI, AppEUI, and AppKey.*
 
 ### Troubleshooting
