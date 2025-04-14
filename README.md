@@ -18,6 +18,7 @@ This Project describes an ESP32-based application for sampling sensor data, perf
   - [Dependencies](#dependencies)
   - [Error Handling and Reliability](#error-handling-and-reliability)
   - [Grafana Visualization](#grafana-visualization)
+  - [Power Consumption](#power-consumption)
   - [Hands-On Walkthrough](#hands-on-walkthrough)
     - [Prerequisites](#prerequisites)
     - [Step-by-Step Setup](#step-by-step-setup)
@@ -203,7 +204,7 @@ Key decisions enhance efficiency and reliability:
 | `TASK_PRIORITY_*`         | 2–5          | Task priorities                                  |
 | `STACK_SIZE_*`            | 4096–8192    | Task stack sizes (bytes)                         |
 | `WIFI_SSID`               | "Najeh's S25 Ultra" | WiFi SSID                                 |
-| `WIFI_PASSWORD`           | "white1xx"   | WiFi password                                    |
+| `WIFI_PASSWORD`           | "demo"   | WiFi password                                    |
 | `MQTT_SERVER`             | "test.mosquitto.org" | MQTT broker                              |
 | `MQTT_PORT`               | 1883         | MQTT port                                        |
 | `MQTT_TOPIC_METRICS`      | "whitex/sensor/metrics" | MQTT topic                            |
@@ -234,7 +235,7 @@ Install via Arduino IDE or PlatformIO.
 **Example**: `vAggregateTask` logs queue timeouts and proceeds to sleep.
 
 ## Grafana Visualization
-Grafana enables real-time visualization of aggregated metrics (`mean`, `median`, `mse`, `latency_ms`, `rate`, `heap`) as time-series charts, providing insights into signal behavior and system performance.
+Grafana enables real-time visualization of aggregated metrics (`mean`, `median`, `mse`, `latency_ms`, `rate`, `heap`) as Table, providing insights into signal behavior and system performance.
 
 - **Purpose**: To monitor trends, e.g., signal stability (`mean` ~1.0, `mse` ~4.0) or processing delays (`latency_ms`).
 - **Setup**: Uses an MQTT data source to fetch JSON payloads from `whitex/sensor/metrics`.
@@ -245,10 +246,16 @@ Grafana enables real-time visualization of aggregated metrics (`mean`, `median`,
   - **Latency**: Monitors processing time, typically 1000–2000 ms.
   - **Rate**: Displays sampling rate, e.g., ~330 Hz after FFT adjustment.
   - See screenshot:
-    ![Grafana Chart](docs/grafana_chart.png)
+    ![Grafana Chart](images/grafana-dashboard.png)
     *Figure: Grafana dashboard showing time-series plots of mean, MSE, latency, and sampling rate.*
 
 Detailed setup instructions are in the [Hands-On Walkthrough](#hands-on-walkthrough).
+
+
+## Power Consumption
+In this setup, we used two ESP32 boards and an INA219 power sensor. One ESP32 acts as the monitor, while the other functions as the load, running the target program. The INA219 is capable of measuring current, voltage, and power. It is connected to the monitoring ESP32 via the I2C interface using the SDA and SCL pins, and its VCC is connected to the 5V pin. On the load side, VIN+ is connected to the 5V output of the load, while VIN− is connected to the monitor ESP32 on the 5V pin. Additionally, a common ground is shared between the load and the monitor, which also serves as the power source in this setup.
+
+![Esp32 Power Consumption](images/esp32-power-consumption.jpg)
 
 ## Hands-On Walkthrough
 This section guides you through setting up the ESP32 application, visualizing data in Grafana, and preparing for LoRaWAN with TTN.
