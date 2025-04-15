@@ -33,27 +33,32 @@ The application runs on an ESP32 microcontroller, utilizing its dual-core proces
 ## What the Code Does
 The code implements a pipeline for processing and transmitting sensor data:
 
-1. **Data Sampling**:
+1. **Find maximum sampling rate**: 
+   - Measures the maximum achievable sampling rate by collecting 10,000 ADC samples and calculating the rate based on elapsed time
+   - Achieving a maximum of 32 kHz on the Heltec ESP32 V3.
+   - Code: [Maximum Sampling Rate](https://github.com/najeh-halawani/IoT-Adaptive-Sampling-MQTT-LoRa/blob/main/find_max_sampling_rate/find_max_sampling_rate.ino)
+
+2. **Data Sampling**:
    - Generates a synthetic signal (100 Hz + 150 Hz sine waves, 1.0 offset) to mimic sensor input.
    - Stores samples in double buffers to prevent data conflicts.
 
-2. **FFT Analysis**:
+3. **FFT Analysis**:
    - Uses `ArduinoFFT` to compute the dominant frequency.
    - Adjusts sampling rate dynamically (2.2x max frequency, Nyquist criterion).
 
-3. **Data Aggregation**:
+4. **Data Aggregation**:
    - Calculates mean, median, and mean squared error (MSE) over a 7-second window.
    - Prepares metrics for transmission.
 
-4. **MQTT Publishing**:
+5. **MQTT Publishing**:
    - Connects to WiFi and an MQTT broker (`test.mosquitto.org`).
    - Publishes metrics to `whitex/sensor/metrics`.
 
-5. **Performance Monitoring**:
+6. **Performance Monitoring**:
    - Tracks latency, heap usage, and MQTT data volume.
    - Publishes JSON-formatted metrics via MQTT.
 
-6. **Power Management**:
+7. **Power Management**:
    - Enters deep sleep for 2.5 seconds per cycle.
    - Preserves state in RTC memory.
 
