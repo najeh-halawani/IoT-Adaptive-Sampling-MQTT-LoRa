@@ -257,6 +257,18 @@ In this setup, we used two ESP32 boards and an INA219 power sensor. One ESP32 ac
 
 ![Esp32 Power Consumption](images/esp32-power-consumption.jpg)
 
+
+
+**The chart below shows the power consumption (in milliwatts) of the ESP32 during its operation cycle.**
+
+- The first spike corresponds to the ESP32 booting up.  
+- The subsequent stable plateau at around **250 milliwatts** indicates the system initializing tasks and beginning sampling.  
+- The following fluctuations, reaching up to **700 milliwatts**, occur during FFT (Fast Fourier Transform) analysis.  
+- The brief drops and minor spikes represent the completion of tasks and the transmission of processed data via queues.  
+- The final set of spikes corresponds to aggregating the results and transmitting them over WiFi/MQTT.  
+- Afterward, the ESP32 enters **deep sleep mode for 2.5 seconds**, leading to a significant drop in power consumption.
+
+![Esp32 Power Consumption Chart](images/power-consumption.png)
 ## Hands-On Walkthrough
 This section guides you through setting up the ESP32 application, visualizing data in Grafana, and preparing for LoRaWAN with TTN.
 
