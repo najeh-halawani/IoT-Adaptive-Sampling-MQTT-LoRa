@@ -277,7 +277,9 @@ Grafana enables real-time visualization of aggregated metrics (`mean`, `median`,
 Detailed setup instructions are in the [Hands-On Walkthrough](#hands-on-walkthrough).
 
 ## Power Consumption
-Power consumption is measured using an INA219 sensor with two ESP32 boards (one as monitor, one as load).
+In this setup, we used two ESP32 boards and an INA219 power sensor. One ESP32 acts as the monitor, while the other functions as the load, running the target program. The INA219 is capable of measuring current, voltage, and power. It is connected to the monitoring ESP32 via the I2C interface using the SDA and SCL pins, and its VCC is connected to the 5V pin. On the load side, VIN+ is connected to the 5V output of the load, while VIN− is connected to the monitor ESP32 on the 5V pin. Additionally, a common ground is shared between the load and the monitor, which also serves as the power source in this setup.
+
+![Esp32 Power Consumption](images/esp32-power-consumption.jpg)
 
 **The chart below shows the power consumption (in milliwatts) of the ESP32 during its operation cycle.**
 
