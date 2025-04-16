@@ -73,34 +73,35 @@ typedef enum {
   BUFFER_READING
 } BufferState_t;
 
-// Shared resources
-float* sample_buffer_1 = NULL;
-float* sample_buffer_2 = NULL;
-float* write_buffer = NULL;  // Buffer being written by vSamplingTask
-float* read_buffer = NULL;   // Buffer to be read by vFFTTask
-BufferState_t buffer_1_state = BUFFER_READY;
-BufferState_t buffer_2_state = BUFFER_READY;
-float aggregate_value = 0;
-AggregateResult_t aggregate_result = { 0, 0, 0 };  // Store mean, median, MSE
-uint64_t sample_timestamp = 0, publish_timestamp = 0;
+// Shared resources for double-buffering and data processing
+float* sample_buffer_1 = NULL;        // First sample buffer
+float* sample_buffer_2 = NULL;        // Second sample buffer
+float* write_buffer = NULL;           // Pointer to buffer being written by sampling task
+float* read_buffer = NULL;            // Pointer to buffer being read by FFT task
+BufferState_t buffer_1_state = BUFFER_READY; // State of first buffer
+BufferState_t buffer_2_state = BUFFER_READY; // State of second buffer
+float aggregate_value = 0;            // Current aggregate value (mean)
+AggregateResult_t aggregate_result = { 0, 0, 0 }; // Store mean, median, MSE
+uint64_t sample_timestamp = 0;        // Timestamp when sampling starts
+uint64_t publish_timestamp = 0;       // Timestamp when MQTT publishes
 
-// FreeRTOS handles
-QueueHandle_t xFFTResultQueue = NULL;
-QueueHandle_t xAggregateQueue = NULL;
-SemaphoreHandle_t xSampleBufferMutex = NULL;
-SemaphoreHandle_t xAggregateMutex = NULL;
-SemaphoreHandle_t xTaskCompleteSemaphore = NULL;
-SemaphoreHandle_t xBufferReadySemaphore = NULL;
-SemaphoreHandle_t xMQTTCompleteSemaphore = NULL;
-volatile int tasks_to_complete = 0;
-const int TOTAL_TASKS = 5;
+// FreeRTOS handles for synchronization and communication
+QueueHandle_t xFFTResultQueue = NULL;        // Queue for FFT results
+QueueHandle_t xAggregateQueue = NULL;        // Queue for aggregate results
+SemaphoreHandle_t xSampleBufferMutex = NULL; // Mutex for sample buffer access
+SemaphoreHandle_t xAggregateMutex = NULL;    // Mutex for aggregate data access
+SemaphoreHandle_t xTaskCompleteSemaphore = NULL; // Semaphore to track task completion
+SemaphoreHandle_t xBufferReadySemaphore = NULL;  // Semaphore to signal buffer readiness
+SemaphoreHandle_t xMQTTCompleteSemaphore = NULL; // Semaphore to signal MQTT completion
+volatile int tasks_to_complete = 0;          // Number of tasks to complete in each cycle
+const int TOTAL_TASKS = 5;                   // Total number of tasks
 
 // Task handles
-TaskHandle_t xSamplingTaskHandle = NULL;
-TaskHandle_t xFFTTaskHandle = NULL;
-TaskHandle_t xAggregateTaskHandle = NULL;
-TaskHandle_t xMQTTTaskHandle = NULL;
-TaskHandle_t xPerformanceTaskHandle = NULL;
+TaskHandle_t xSamplingTaskHandle = NULL;    // Task handle for sampling task
+TaskHandle_t xFFTTaskHandle = NULL;         // Task handle for FFT task
+TaskHandle_t xAggregateTaskHandle = NULL;   // Task handle for aggregation task
+TaskHandle_t xMQTTTaskHandle = NULL;        // Task handle for MQTT task
+TaskHandle_t xPerformanceTaskHandle = NULL; // Task handle for performance task
 
 // MQTT client
 WiFiClient espClient;
@@ -142,7 +143,6 @@ void setup() {
   }
   Serial.printf("Cycle Count: %d\n", cycle_count);
   Serial.printf("Current Sample Rate: %d Hz\n", current_sample_rate);
-  //    // Serial.printf("Free heap before setup: %d bytes\n", esp_get_free_heap_size());
 
   // Initialize watchdog
   Serial.println("Configuring Task Watchdog Timer...");
@@ -155,9 +155,11 @@ void setup() {
     Serial.printf("Warning: esp_task_wdt_deinit() error: %s (%d)\n", esp_err_to_name(wdt_deinit_err), wdt_deinit_err);
   }
 
+
+  // configure WDT with 15-second timeout and panic on failure
   esp_task_wdt_config_t wdt_config = {
     .timeout_ms = 15000,
-    .idle_core_mask = (1 << 2) - 1,
+    .idle_core_mask = (1 << 2) - 1, // monitor both cores
     .trigger_panic = true
   };
   esp_err_t wdt_init_err = esp_task_wdt_init(&wdt_config);
@@ -183,12 +185,8 @@ void setup() {
     delay(1000);
     esp_restart();
   }
-  // Initialize buffers with dummy data
-  // for (int i = 0; i < BUFFER_SIZE; i++) {
-  //   float t = (float)i / MAX_SAMPLE_RATE;
-  //   sample_buffer_1[i] = 5.0 * sin(2.0 * M_PI * 150.0 * t) + 4.0 * sin(2.0 * M_PI * 100.0 * t) + 1.0;
-  //   sample_buffer_2[i] = sample_buffer_1[i];
-  // }
+
+  // initialize buffer pointers and states
   write_buffer = sample_buffer_1;
   read_buffer = sample_buffer_2;
   buffer_1_state = BUFFER_WRITING;
@@ -257,7 +255,6 @@ void setup() {
     vPerformanceTask, "PerformanceTask", STACK_SIZE_PERF,
     NULL, TASK_PRIORITY_PERF, &xPerformanceTaskHandle, 1);
 
-  //    // Serial.printf("Free heap after setup: %d bytes\n", esp_get_free_heap_size());
   Serial.println("--- Setup Complete ---");
 }
 
@@ -269,20 +266,23 @@ void loop() {
   TickType_t start_tick = xTaskGetTickCount();
   TickType_t timeout_ticks = pdMS_TO_TICKS(12000);
 
+  // wait for all tasks to complete
   while (completed_count < tasks_to_complete) {
     if (xSemaphoreTake(xTaskCompleteSemaphore, 0) == pdPASS) {
       completed_count++;
     } else {
+      // Check for timeout
       if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
         Serial.printf("Loop: Timeout waiting for tasks! Expected %d, got %d.\n", tasks_to_complete, completed_count);
         all_tasks_completed = false;
         break;
       }
-      vTaskDelay(pdMS_TO_TICKS(50));
+      vTaskDelay(pdMS_TO_TICKS(50)); // Short delay to prevent busy-waiting
       esp_task_wdt_reset();
     }
   }
 
+  // clear any remaining semaphore counts
   while (xSemaphoreTake(xTaskCompleteSemaphore, 0) == pdPASS)
     ;
 
@@ -316,6 +316,7 @@ void vSamplingTask(void* pvParameters) {
     double t = (double)i / actual_sample_rate;
     double signal = 2.0 * sin(2.0 * PI * 150.0 * t) + 4.0 * sin(2.0 * PI * 160.0 * t);
 
+    // safely write to buffer using mutex
     if (xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
       write_buffer[i] = signal;
       xSemaphoreGive(xSampleBufferMutex);
@@ -335,8 +336,9 @@ void vSamplingTask(void* pvParameters) {
   }
   Serial.println();
 
-  // Rest of the function remains unchanged
+  // Swap buffers after sampling
   if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+      // Update buffer states and pointers
     if (write_buffer == sample_buffer_1) {
       buffer_1_state = BUFFER_READY;
       buffer_2_state = BUFFER_WRITING;
@@ -356,8 +358,8 @@ void vSamplingTask(void* pvParameters) {
     success = false;
   }
 
+  // Signal that buffer is ready for FFT task
   if (success && xBufferReadySemaphore) {
-
     xSemaphoreGive(xBufferReadySemaphore);
     Serial.println("SamplingTask: Signaled buffer ready");
   } else {
@@ -366,6 +368,7 @@ void vSamplingTask(void* pvParameters) {
 
   Serial.printf("SamplingTask complete (%s)\n", success ? "Success" : "Failed");
 
+  // Signal task completion
   if (xTaskCompleteSemaphore) {
     xSemaphoreGive(xTaskCompleteSemaphore);
   }
@@ -384,6 +387,7 @@ void vFFTTask(void* pvParameters) {
   bool success = true;
   FFTResult_t fftResult = { 0, 0, rate_data_was_sampled_at };
 
+  // Wait for buffer to be ready
   Serial.println("FFTTask: Waiting for buffer ready signal");
   if (xBufferReadySemaphore && xSemaphoreTake(xBufferReadySemaphore, pdMS_TO_TICKS(10000)) == pdPASS) {
     Serial.println("FFTTask: Received buffer ready signal");
@@ -414,6 +418,7 @@ void vFFTTask(void* pvParameters) {
       }
     }
 
+      // Copy data from buffer to FFT arrays
     if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
       BufferState_t read_state = (read_buffer == sample_buffer_1) ? buffer_1_state : buffer_2_state;
       if (read_state != BUFFER_READY) {
@@ -472,6 +477,7 @@ void vFFTTask(void* pvParameters) {
     if (vImag) free(vImag);
   }
 
+  // send FFT results to aggregate task
   if (xFFTResultQueue) {
     if (xQueueOverwrite(xFFTResultQueue, &fftResult) == pdPASS) {
       Serial.println("FFTTask: Sent result to Aggregate queue");
@@ -486,6 +492,7 @@ void vFFTTask(void* pvParameters) {
 
   Serial.printf("FFTTask complete (%s)\n", success ? "Success" : "Failed");
 
+  // signal task completion
   if (xTaskCompleteSemaphore) {
     xSemaphoreGive(xTaskCompleteSemaphore);
   }
@@ -506,6 +513,7 @@ void vAggregateTask(void* pvParameters) {
   FFTResult_t fftResult;
   AggregateResult_t aggResult = { 0, 0, 0 };
 
+  // wait for FFT results
   Serial.println("AggregateTask: Waiting for FFT result");
   if (xFFTResultQueue && xQueueReceive(xFFTResultQueue, &fftResult, pdMS_TO_TICKS(12000)) == pdPASS) {
     Serial.println("AggregateTask: Received FFT result");
@@ -588,6 +596,7 @@ void vAggregateTask(void* pvParameters) {
       }
     }
 
+    // store aggregate value
     if (success && xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
       aggregate_value = aggResult.mean;
       xSemaphoreGive(xAggregateMutex);
@@ -595,6 +604,7 @@ void vAggregateTask(void* pvParameters) {
       Serial.println("AggregateTask: Aggregate mutex timeout");
     }
 
+    // send aggregate results to MQTT task
     if (xAggregateQueue) {
       if (xQueueOverwrite(xAggregateQueue, &aggResult) == pdPASS) {
         Serial.println("AggregateTask: Sent aggregate results to MQTT queue");
@@ -611,10 +621,12 @@ void vAggregateTask(void* pvParameters) {
   Serial.printf("AggregateTask complete (%s), Mean = %.2f, Median = %.2f, MSE = %.2f\n",
                 success ? "Success" : "Failed", aggResult.mean, aggResult.median, aggResult.mse);
 
+  // signal task completion
   if (xTaskCompleteSemaphore) {
     xSemaphoreGive(xTaskCompleteSemaphore);
   }
 
+  // do a cleanup
   esp_task_wdt_delete(NULL);
   vTaskDelete(NULL);
 }
@@ -630,6 +642,7 @@ void vMQTTTask(void* pvParameters) {
   AggregateResult_t aggResult = { 0, 0, 0 };
 
   Serial.println("MQTTTask: Waiting for aggregate values");
+  // wait for aggregate results
   if (xAggregateQueue) {
     if (xQueueReceive(xAggregateQueue, &aggResult, pdMS_TO_TICKS(5000)) == pdPASS) {
       Serial.println("MQTTTask: Received aggregate results");
@@ -654,7 +667,7 @@ void vMQTTTask(void* pvParameters) {
         Serial.println("MQTTTask: MQTT disconnected, reconnecting...");
         reconnect_mqtt();
       }
-
+      // store aggregate results
       if (client.connected()) {
         if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
           aggregate_result.mean = aggResult.mean;
@@ -709,6 +722,7 @@ void vPerformanceTask(void* pvParameters) {
   AggregateResult_t aggResult = { 0, 0, 0 };
   float avg_latency_ms = latency_count > 0 ? (float)(total_latency_us / latency_count) / 1000.0 : 0;
 
+  // wait for MQTT task completion
   Serial.println("PerformanceTask: Waiting for MQTTTask");
   if (xMQTTCompleteSemaphore && xSemaphoreTake(xMQTTCompleteSemaphore, pdMS_TO_TICKS(5000)) == pdPASS) {
     Serial.println("PerformanceTask: MQTTTask completed");
@@ -717,6 +731,7 @@ void vPerformanceTask(void* pvParameters) {
     success = false;
   }
 
+  // read aggregate results
   if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     aggResult = aggregate_result;
     Serial.printf("PerformanceTask: Read Mean=%.2f, Median=%.2f, MSE=%.2f\n",
@@ -727,6 +742,7 @@ void vPerformanceTask(void* pvParameters) {
     success = false;
   }
 
+  // publish performance metrics via MQTT
   if (success && WiFi.status() == WL_CONNECTED && client.connected()) {
     StaticJsonDocument<256> doc;
     doc["mean"] = round(aggResult.mean);
@@ -768,6 +784,7 @@ void enter_deep_sleep() {
   Serial.printf("Cycle %d finished. Sleeping for %.2f seconds...\n", cycle_count, (float)SLEEP_DURATION_US / 1000000.0);
   Serial.flush();
 
+  // configure timer wakeup and enter deep sleep
   esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
   esp_deep_sleep_start();
 }
