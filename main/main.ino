@@ -14,11 +14,11 @@
 #include <ArduinoJson.h>
 
 // Configuration constants
-#define BUFFER_SIZE 256
-#define WINDOW_SEC 7
+#define BUFFER_SIZE 128
+#define WINDOW_SEC 5
 #define MIN_SAMPLE_RATE 10
-#define MAX_SAMPLE_RATE 32000
-#define SLEEP_DURATION_US 2500000
+#define MAX_SAMPLE_RATE 2000
+#define SLEEP_DURATION_US 3000000
 #define WIFI_RECONNECT_ATTEMPTS 10
 #define MQTT_RECONNECT_ATTEMPTS 5
 
@@ -37,8 +37,8 @@
 #define STACK_SIZE_PERF 4096
 
 // WiFi and MQTT credentials
-const char* WIFI_SSID = "Najeh's S25 Ultra";
-const char* WIFI_PASSWORD = "white1xx";
+const char* WIFI_SSID = "whitex";
+const char* WIFI_PASSWORD = "whitewhite";
 const char* MQTT_SERVER = "test.mosquitto.org";
 const int MQTT_PORT = 1883;
 const char* MQTT_CLIENT_ID = "ESP32_FFT_Client_";
@@ -66,12 +66,22 @@ typedef struct {
   float mse;
 } AggregateResult_t;
 
+// Buffer states
+typedef enum {
+  BUFFER_WRITING,
+  BUFFER_READY,
+  BUFFER_READING
+} BufferState_t;
+
 // Shared resources
 float* sample_buffer_1 = NULL;
 float* sample_buffer_2 = NULL;
-volatile bool use_buffer_1 = true;
+float* write_buffer = NULL;  // Buffer being written by vSamplingTask
+float* read_buffer = NULL;   // Buffer to be read by vFFTTask
+BufferState_t buffer_1_state = BUFFER_READY;
+BufferState_t buffer_2_state = BUFFER_READY;
 float aggregate_value = 0;
-AggregateResult_t aggregate_result = {0, 0, 0}; // Store mean, median, MSE
+AggregateResult_t aggregate_result = { 0, 0, 0 };  // Store mean, median, MSE
 uint64_t sample_timestamp = 0, publish_timestamp = 0;
 
 // FreeRTOS handles
@@ -80,8 +90,8 @@ QueueHandle_t xAggregateQueue = NULL;
 SemaphoreHandle_t xSampleBufferMutex = NULL;
 SemaphoreHandle_t xAggregateMutex = NULL;
 SemaphoreHandle_t xTaskCompleteSemaphore = NULL;
-SemaphoreHandle_t xSamplingCompleteSemaphore = NULL;
-SemaphoreHandle_t xMQTTCompleteSemaphore = NULL; // New semaphore
+SemaphoreHandle_t xBufferReadySemaphore = NULL;
+SemaphoreHandle_t xMQTTCompleteSemaphore = NULL;
 volatile int tasks_to_complete = 0;
 const int TOTAL_TASKS = 5;
 
@@ -127,15 +137,12 @@ void setup() {
       mqtt_bytes_sent_total = 0;
       total_latency_us = 0;
       latency_count = 0;
-      if (current_sample_rate < MIN_SAMPLE_RATE || current_sample_rate > MAX_SAMPLE_RATE) {
-        Serial.printf("Resetting sample rate from %d to %d\n", current_sample_rate, MIN_SAMPLE_RATE);
-        current_sample_rate = MIN_SAMPLE_RATE;
-      }
+
       break;
   }
   Serial.printf("Cycle Count: %d\n", cycle_count);
   Serial.printf("Current Sample Rate: %d Hz\n", current_sample_rate);
-  Serial.printf("Free heap before setup: %d bytes\n", esp_get_free_heap_size());
+  //    // Serial.printf("Free heap before setup: %d bytes\n", esp_get_free_heap_size());
 
   // Initialize watchdog
   Serial.println("Configuring Task Watchdog Timer...");
@@ -176,9 +183,17 @@ void setup() {
     delay(1000);
     esp_restart();
   }
-  memset(sample_buffer_1, 0, BUFFER_SIZE * sizeof(float));
-  memset(sample_buffer_2, 0, BUFFER_SIZE * sizeof(float));
-  Serial.println("Sample buffers allocated.");
+  // Initialize buffers with dummy data
+  // for (int i = 0; i < BUFFER_SIZE; i++) {
+  //   float t = (float)i / MAX_SAMPLE_RATE;
+  //   sample_buffer_1[i] = 5.0 * sin(2.0 * M_PI * 150.0 * t) + 4.0 * sin(2.0 * M_PI * 100.0 * t) + 1.0;
+  //   sample_buffer_2[i] = sample_buffer_1[i];
+  // }
+  write_buffer = sample_buffer_1;
+  read_buffer = sample_buffer_2;
+  buffer_1_state = BUFFER_WRITING;
+  buffer_2_state = BUFFER_READY;
+  Serial.println("Sample buffers allocated and initialized.");
 
   // Create queues
   xFFTResultQueue = xQueueCreate(1, sizeof(FFTResult_t));
@@ -196,14 +211,11 @@ void setup() {
   xSampleBufferMutex = xSemaphoreCreateMutex();
   xAggregateMutex = xSemaphoreCreateMutex();
   xTaskCompleteSemaphore = xSemaphoreCreateCounting(TOTAL_TASKS, 0);
-  xSamplingCompleteSemaphore = xSemaphoreCreateBinary();
+  xBufferReadySemaphore = xSemaphoreCreateBinary();
   xMQTTCompleteSemaphore = xSemaphoreCreateBinary();
-  if (!xSampleBufferMutex || !xAggregateMutex || !xTaskCompleteSemaphore ||
-      !xSamplingCompleteSemaphore || !xMQTTCompleteSemaphore) {
+  if (!xSampleBufferMutex || !xAggregateMutex || !xTaskCompleteSemaphore || !xBufferReadySemaphore || !xMQTTCompleteSemaphore) {
     Serial.println("FATAL: Failed to create mutexes/semaphore.");
     if (sample_buffer_1) free(sample_buffer_1);
-    if (sample_buffer_2) free(sample_buffer_2);
-    if (*sample_buffer_1) free(sample_buffer_1);
     if (sample_buffer_2) free(sample_buffer_2);
     if (xFFTResultQueue) vQueueDelete(xFFTResultQueue);
     if (xAggregateQueue) vQueueDelete(xAggregateQueue);
@@ -222,7 +234,7 @@ void setup() {
     Serial.println("Skipping MQTT connection (WiFi not connected).");
   }
 
-  Serial.println("Creating tasks...");
+  //    Serial.println("Creating tasks...");
   tasks_to_complete = TOTAL_TASKS;
 
   xTaskCreatePinnedToCore(
@@ -245,7 +257,7 @@ void setup() {
     vPerformanceTask, "PerformanceTask", STACK_SIZE_PERF,
     NULL, TASK_PRIORITY_PERF, &xPerformanceTaskHandle, 1);
 
-  Serial.printf("Free heap after setup: %d bytes\n", esp_get_free_heap_size());
+  //    // Serial.printf("Free heap after setup: %d bytes\n", esp_get_free_heap_size());
   Serial.println("--- Setup Complete ---");
 }
 
@@ -282,455 +294,6 @@ void loop() {
 
   enter_deep_sleep();
 }
-
-
-void vSamplingTask(void* pvParameters) {
-  esp_task_wdt_add(NULL);
-  Serial.println("SamplingTask: Subscribed to WDT");
-
-  int actual_sample_rate = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-  if (actual_sample_rate != current_sample_rate) {
-    Serial.printf("SamplingTask: Clamped rate from %d to %d Hz\n", current_sample_rate, actual_sample_rate);
-  }
-
-  sample_timestamp = esp_timer_get_time();
-  float* target_buffer = use_buffer_1 ? sample_buffer_1 : sample_buffer_2;
-  const uint32_t sample_period_us = 1000000 / actual_sample_rate;
-  bool success = true;
-  const float OFFSET = 1.0; // Offset for sine wave
-
-  Serial.printf("SamplingTask started at %llu, rate %d Hz\n", sample_timestamp, actual_sample_rate);
-
-  for (int i = 0; i < BUFFER_SIZE && success; i++) {
-    uint64_t start_sample_time = esp_timer_get_time();
-    float t = (float)start_sample_time / 1000000.0;
-    float signal = 2.0 * sin(2.0 * M_PI * 150.0 * t) + 4.0 * sin(2.0 * M_PI * 100.0 * t) + OFFSET;
-
-    if (xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      target_buffer[i] = signal;
-      xSemaphoreGive(xSampleBufferMutex);
-    } else {
-      Serial.println("SamplingTask: Buffer mutex timeout");
-      success = false;
-    }
-
-    uint64_t computation_time = esp_timer_get_time() - start_sample_time;
-    if (computation_time < sample_period_us) {
-      delayMicroseconds(sample_period_us - computation_time);
-    } else {
-      Serial.printf("SamplingTask: WARN - Computation time (%llu us) >= Period (%u us)\n", computation_time, sample_period_us);
-    }
-    esp_task_wdt_reset();
-  }
-
-  if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    use_buffer_1 = !use_buffer_1;
-    xSemaphoreGive(xSampleBufferMutex);
-    Serial.println("SamplingTask: Buffer swapped");
-  } else if (success) {
-    Serial.println("SamplingTask: Swap mutex timeout");
-    success = false;
-  }
-
-  Serial.printf("SamplingTask complete (%s)\n", success ? "Success" : "Failed");
-
-  if (xSamplingCompleteSemaphore) {
-    xSemaphoreGive(xSamplingCompleteSemaphore);
-    Serial.println("SamplingTask: Signaled FFT task");
-  }
-
-  if (xTaskCompleteSemaphore) {
-    xSemaphoreGive(xTaskCompleteSemaphore);
-  }
-
-  esp_task_wdt_delete(NULL);
-  Serial.println("SamplingTask: About to delete itself");
-  vTaskDelete(NULL);
-}
-
-void vFFTTask(void* pvParameters) {
-  esp_task_wdt_add(NULL);
-  Serial.println("FFTTask: Subscribed to WDT");
-
-  int rate_data_was_sampled_at = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-  uint64_t start_time = esp_timer_get_time();
-  Serial.printf("FFTTask started at %llu, rate %d Hz\n", start_time, rate_data_was_sampled_at);
-
-  bool success = true;
-  FFTResult_t fftResult = { 0, 0, rate_data_was_sampled_at };
-
-  vTaskDelay(pdMS_TO_TICKS(100));
-  Serial.println("FFTTask: Waiting for sampling signal");
-
-  if (xSamplingCompleteSemaphore && xSemaphoreTake(xSamplingCompleteSemaphore, pdMS_TO_TICKS(10000)) == pdPASS) {
-    Serial.println("FFTTask: Received sampling signal");
-  } else {
-    Serial.println("FFTTask: Timeout waiting for sampling signal!");
-    success = false;
-  }
-
-  if (success) {
-    float* source_buffer = use_buffer_1 ? sample_buffer_2 : sample_buffer_1;
-    double* vReal = (double*)malloc(BUFFER_SIZE * sizeof(double));
-    double* vImag = (double*)malloc(BUFFER_SIZE * sizeof(double));
-    ArduinoFFT<double>* FFT = NULL;
-
-    if (!vReal || !vImag) {
-      Serial.println("FFTTask: Memory allocation failed!");
-      if (vReal) free(vReal);
-      if (vImag) free(vImag);
-      success = false;
-    }
-
-    if (success) {
-      FFT = new ArduinoFFT<double>(vReal, vImag, BUFFER_SIZE, (double)rate_data_was_sampled_at);
-      if (!FFT) {
-        Serial.println("FFTTask: FFT instance creation failed!");
-        free(vReal);
-        free(vImag);
-        success = false;
-      }
-    }
-
-    if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      memcpy(vReal, source_buffer, BUFFER_SIZE * sizeof(double));
-      memset(vImag, 0, BUFFER_SIZE * sizeof(double));
-      xSemaphoreGive(xSampleBufferMutex);
-    } else if (success) {
-      Serial.println("FFTTask: Buffer mutex timeout!");
-      success = false;
-    }
-
-    if (success) {
-      FFT->windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-      FFT->compute(FFT_FORWARD);
-      FFT->complexToMagnitude();
-
-      float max_freq = 0;
-      float max_magnitude = 0;
-      for (int i = 1; i < BUFFER_SIZE / 2; i++) {
-        if (vReal[i] > max_magnitude) {
-          max_magnitude = vReal[i];
-          max_freq = (float)i * rate_data_was_sampled_at / BUFFER_SIZE;
-        }
-      }
-      Serial.printf("FFTTask: Max freq = %.2f Hz, Mag = %.2f\n", max_freq, max_magnitude);
-
-      // int new_rate = (int)(2.2 * max_freq + 0.5);
-      int new_rate = (int)(2 * max_freq + 0.5);
-      new_rate = constrain(new_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-      if (new_rate != rate_data_was_sampled_at) {
-        Serial.printf("FFTTask: Adjusting rate to %d Hz\n", new_rate);
-      }
-      current_sample_rate = new_rate;
-
-      fftResult.max_frequency = max_freq;
-      fftResult.max_magnitude = max_magnitude;
-      fftResult.new_sample_rate = current_sample_rate;
-    }
-
-    if (FFT) delete FFT;
-    if (vReal) free(vReal);
-    if (vImag) free(vImag);
-  }
-
-  if (xFFTResultQueue) {
-    if (xQueueOverwrite(xFFTResultQueue, &fftResult) == pdPASS) {
-      Serial.println("FFTTask: Sent result to Aggregate queue");
-    } else {
-      Serial.println("FFTTask: Queue send failed!");
-      success = false;
-    }
-  } else {
-    Serial.println("FFTTask: Queue null!");
-    success = false;
-  }
-
-  Serial.printf("FFTTask complete (%s)\n", success ? "Success" : "Failed");
-
-  if (xTaskCompleteSemaphore) {
-    xSemaphoreGive(xTaskCompleteSemaphore);
-  }
-
-  esp_task_wdt_delete(NULL);
-  vTaskDelete(NULL);
-}
-
-void vAggregateTask(void* pvParameters) {
-  esp_task_wdt_add(NULL);
-  Serial.println("AggregateTask: Subscribed to WDT");
-
-  int rate_data_was_sampled_at = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
-  uint64_t start_time = esp_timer_get_time();
-  Serial.printf("AggregateTask started at %llu\n", start_time);
-
-  bool success = true;
-  FFTResult_t fftResult;
-  AggregateResult_t aggResult = {0, 0, 0};
-
-  Serial.println("AggregateTask: Waiting for FFT result");
-  if (xFFTResultQueue && xQueueReceive(xFFTResultQueue, &fftResult, pdMS_TO_TICKS(12000)) == pdPASS) {
-    Serial.println("AggregateTask: Received FFT result");
-  } else {
-    Serial.println("AggregateTask: FFT queue timeout!");
-    success = false;
-  }
-
-  if (success) {
-    float* source_buffer = use_buffer_1 ? sample_buffer_2 : sample_buffer_1;
-    int num_samples_in_window = rate_data_was_sampled_at * WINDOW_SEC;
-    int num_samples_to_average = min(num_samples_in_window, BUFFER_SIZE);
-
-    if (num_samples_to_average <= 0) {
-      Serial.printf("AggregateTask: Invalid num_samples_to_average (%d)\n", num_samples_to_average);
-      aggResult.mean = 0;
-      aggResult.median = 0;
-      aggResult.mse = 0;
-    } else {
-      float sum = 0;
-      float* temp_buffer = (float*)malloc(num_samples_to_average * sizeof(float));
-      if (!temp_buffer) {
-        Serial.println("AggregateTask: Memory allocation failed for temp buffer!");
-        success = false;
-      }
-
-      if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        int start_index = BUFFER_SIZE - num_samples_to_average;
-
-        // Copy samples to temp buffer and calculate sum
-        for (int i = 0; i < num_samples_to_average; i++) {
-          temp_buffer[i] = source_buffer[start_index + i];
-          sum += temp_buffer[i];
-        }
-        xSemaphoreGive(xSampleBufferMutex);
-
-        aggResult.mean = sum / num_samples_to_average;
-        
-        // Bubble Sort
-        for (int i = 0; i < num_samples_to_average - 1; i++) {
-          for (int j = 0; j < num_samples_to_average - i - 1; j++) {
-            if (temp_buffer[j] > temp_buffer[j + 1]) {
-              float temp = temp_buffer[j];
-              temp_buffer[j] = temp_buffer[j + 1];
-              temp_buffer[j + 1] = temp;
-            }
-          }
-        }
-
-        // Calculate median
-        if (num_samples_to_average % 2 == 0) {
-          aggResult.median = (temp_buffer[num_samples_to_average / 2 - 1] + temp_buffer[num_samples_to_average / 2]) / 2.0;
-        } else {
-          aggResult.median = temp_buffer[num_samples_to_average / 2];
-        }
-
-
-        // Calculate Mean Squared Error (MSE)
-        float sum_squared_error = 0;
-        for (int i = 0; i < num_samples_to_average; i++) {
-          float error = temp_buffer[i] - aggResult.mean;
-          sum_squared_error += error * error;
-        }
-        aggResult.mse = sum_squared_error / num_samples_to_average;
-
-        Serial.print("AggregateTask: Samples: ");
-        for (int i = 0; i < num_samples_to_average; i++) {
-          Serial.print(temp_buffer[i]);
-          Serial.print(" ");
-        }
-        Serial.println();
-
-        free(temp_buffer);
-      } else {
-        Serial.println("AggregateTask: Buffer mutex timeout!");
-        success = false;
-        aggResult.mean = 0;
-        aggResult.median = 0;
-        aggResult.mse = 0;
-      }
-    }
-
-    if (success && xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      aggregate_value = aggResult.mean;
-      xSemaphoreGive(xAggregateMutex);
-    } else if (success) {
-      Serial.println("AggregateTask: Aggregate mutex timeout");
-    }
-
-    if (xAggregateQueue) {
-      if (xQueueOverwrite(xAggregateQueue, &aggResult) == pdPASS) {
-        Serial.println("AggregateTask: Sent aggregate results to MQTT queue");
-      } else {
-        Serial.println("AggregateTask: Queue send failed!");
-        success = false;
-      }
-    } else {
-      Serial.println("AggregateTask: Queue null!");
-      success = false;
-    }
-  }
-
-  Serial.printf("AggregateTask complete (%s), Mean = %.2f, Median = %.2f, MSE = %.2f\n",
-                success ? "Success" : "Failed", aggResult.mean, aggResult.median, aggResult.mse);
-
-  if (xTaskCompleteSemaphore) {
-    xSemaphoreGive(xTaskCompleteSemaphore);
-  }
-
-  esp_task_wdt_delete(NULL);
-  vTaskDelete(NULL);
-}
-
-void vMQTTTask(void* pvParameters) {
-  esp_task_wdt_add(NULL);
-  Serial.println("MQTTTask: Subscribed to WDT");
-
-  uint64_t start_time = esp_timer_get_time();
-  Serial.printf("MQTTTask started at %llu\n", start_time);
-
-  bool success = true;
-  AggregateResult_t aggResult = {0, 0, 0};
-
-  Serial.println("MQTTTask: Waiting for aggregate values");
-  if (xAggregateQueue) {
-    if (xQueueReceive(xAggregateQueue, &aggResult, pdMS_TO_TICKS(5000)) == pdPASS) {
-      Serial.println("MQTTTask: Received aggregate results");
-      Serial.printf("MQTTTask: Mean=%.2f, Median=%.2f, MSE=%.2f\n", aggResult.mean, aggResult.median, aggResult.mse);
-    } else {
-      Serial.println("MQTTTask: Queue timeout!");
-      success = false;
-    }
-  } else {
-    Serial.println("MQTTTask: Queue null!");
-    success = false;
-  }
-
-  if (success) {
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("MQTTTask: WiFi disconnected, reconnecting...");
-      connect_wifi();
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      if (!client.connected()) {
-        Serial.println("MQTTTask: MQTT disconnected, reconnecting...");
-        reconnect_mqtt();
-      }
-
-      if (client.connected()) {
-        // Store aggregate results globally
-        if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-          aggregate_result.mean = aggResult.mean;
-          aggregate_result.median = aggResult.median;
-          aggregate_result.mse = aggResult.mse;
-          xSemaphoreGive(xAggregateMutex);
-          Serial.printf("MQTTTask: Stored Mean=%.2f, Median=%.2f, MSE=%.2f\n",
-                        aggResult.mean, aggResult.median, aggResult.mse);
-          xSemaphoreGive(xMQTTCompleteSemaphore); // Signal PerformanceTask
-        } else {
-          Serial.println("MQTTTask: Aggregate mutex timeout");
-          success = false;
-        }
-
-        publish_timestamp = esp_timer_get_time();
-        if (sample_timestamp > 0) {
-          uint64_t latency_us = publish_timestamp - sample_timestamp;
-          total_latency_us += latency_us;
-          latency_count++;
-          Serial.printf("MQTTTask: Latency: %llu us\n", latency_us);
-        }
-
-        client.loop();
-      } else {
-        Serial.println("MQTTTask: Not connected.");
-        success = false;
-      }
-    } else {
-      Serial.println("MQTTTask: WiFi not connected.");
-      success = false;
-    }
-  }
-
-  Serial.printf("MQTTTask complete (%s)\n", success ? "Success" : "Failed");
-
-  if (xTaskCompleteSemaphore) {
-    xSemaphoreGive(xTaskCompleteSemaphore);
-  }
-
-  esp_task_wdt_delete(NULL);
-  vTaskDelete(NULL);
-}
-
-void vPerformanceTask(void* pvParameters) {
-  esp_task_wdt_add(NULL);
-  Serial.println("PerformanceTask: Subscribed to WDT");
-
-  uint64_t start_time = esp_timer_get_time();
-  Serial.printf("PerformanceTask started at %llu\n", start_time);
-
-  bool success = true;
-  AggregateResult_t aggResult = {0, 0, 0};
-  float avg_latency_ms = latency_count > 0 ? (float)(total_latency_us / latency_count) / 1000.0 : 0;
-
-  // Wait for MQTTTask to complete
-  Serial.println("PerformanceTask: Waiting for MQTTTask");
-  if (xMQTTCompleteSemaphore && xSemaphoreTake(xMQTTCompleteSemaphore, pdMS_TO_TICKS(5000)) == pdPASS) {
-    Serial.println("PerformanceTask: MQTTTask completed");
-  } else {
-    Serial.println("PerformanceTask: Timeout waiting for MQTTTask!");
-    success = false;
-  }
-
-  // Retrieve aggregate results
-  if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    aggResult = aggregate_result;
-    Serial.printf("PerformanceTask: Read Mean=%.2f, Median=%.2f, MSE=%.2f\n",
-                  aggResult.mean, aggResult.median, aggResult.mse);
-    xSemaphoreGive(xAggregateMutex);
-  } else {
-    Serial.println("PerformanceTask: Aggregate mutex timeout");
-    success = false;
-  }
-
-  if (success && WiFi.status() == WL_CONNECTED && client.connected()) {
-    // Create JSON document
-    StaticJsonDocument<256> doc;
-    doc["mean"] = round(aggResult.mean);
-    doc["median"] = round(aggResult.median);
-    doc["mse"] = round(aggResult.mse);
-    doc["cycle"] = cycle_count;
-    doc["latency_ms"] = round(avg_latency_ms * 10) / 10.0;
-    doc["rate"] = current_sample_rate;
-    doc["mqtt_bytes"] = mqtt_bytes_sent_total;
-    doc["heap"] = esp_get_free_heap_size();
-
-    // Serialize JSON to string
-    char metrics_buffer[256];
-    size_t len = serializeJson(doc, metrics_buffer, sizeof(metrics_buffer));
-
-    if (len > 0) {
-      Serial.printf("PerformanceTask: Publishing JSON: %s\n", metrics_buffer);
-      publish_mqtt_message(MQTT_TOPIC_METRICS, metrics_buffer);
-    } else {
-      Serial.println("PerformanceTask: JSON serialization failed!");
-      success = false;
-    }
-  } else {
-    Serial.println("PerformanceTask: Cannot publish (not connected)");
-    success = false;
-  }
-
-  Serial.printf("PerformanceTask complete (%s)\n", success ? "Success" : "Failed");
-
-  if (xTaskCompleteSemaphore) {
-    xSemaphoreGive(xTaskCompleteSemaphore);
-  }
-
-  esp_task_wdt_delete(NULL);
-  vTaskDelete(NULL);
-}
-
-
 
 void connect_wifi() {
   if (WiFi.status() == WL_CONNECTED) {
@@ -829,6 +392,473 @@ void publish_mqtt_message(const char* topic, const char* payload) {
   }
 }
 
+void vSamplingTask(void* pvParameters) {
+  esp_task_wdt_add(NULL);
+
+  int actual_sample_rate = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
+  if (actual_sample_rate != current_sample_rate) {
+    Serial.printf("SamplingTask: Clamped rate from %d to %d Hz\n", current_sample_rate, actual_sample_rate);
+  }
+
+  sample_timestamp = esp_timer_get_time();
+  const uint32_t sample_period_us = 1000000 / actual_sample_rate;
+  bool success = true;
+
+  Serial.printf("SamplingTask started at %llu, rate %d Hz\n", sample_timestamp, actual_sample_rate);
+
+
+  for (int i = 0; i < BUFFER_SIZE && success; i++) {
+    uint64_t start_sample_time = esp_timer_get_time();
+
+    double t = (double)i / actual_sample_rate;
+    double signal = 2.0 * sin(2.0 * PI * 150.0 * t) + 4.0 * sin(2.0 * PI * 160.0 * t);
+
+    if (xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+      write_buffer[i] = signal;
+      xSemaphoreGive(xSampleBufferMutex);
+    } else {
+      Serial.println("SamplingTask: Buffer mutex timeout");
+      success = false;
+    }
+
+    // Maintain timing to approximate real-time sampling
+    uint64_t computation_time = esp_timer_get_time() - start_sample_time;
+    if (computation_time < sample_period_us) {
+      delayMicroseconds(sample_period_us - computation_time);
+    } else {
+      Serial.printf("SamplingTask: WARN - Computation time (%llu us) >= Period (%u us)\n", computation_time, sample_period_us);
+    }
+    esp_task_wdt_reset();
+  }
+  Serial.println();
+
+  // Rest of the function remains unchanged
+  if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    if (write_buffer == sample_buffer_1) {
+      buffer_1_state = BUFFER_READY;
+      buffer_2_state = BUFFER_WRITING;
+      write_buffer = sample_buffer_2;
+      read_buffer = sample_buffer_1;
+    } else {
+      buffer_2_state = BUFFER_READY;
+      buffer_1_state = BUFFER_WRITING;
+      write_buffer = sample_buffer_1;
+      read_buffer = sample_buffer_2;
+    }
+    Serial.printf("SamplingTask: Buffer states - Buf1: %d, Buf2: %d\n", buffer_1_state, buffer_2_state);
+    xSemaphoreGive(xSampleBufferMutex);
+    Serial.println("SamplingTask: Buffer swapped successfully");
+  } else if (success) {
+    Serial.println("SamplingTask: Swap mutex timeout");
+    success = false;
+  }
+
+  if (success && xBufferReadySemaphore) {
+
+    xSemaphoreGive(xBufferReadySemaphore);
+    Serial.println("SamplingTask: Signaled buffer ready");
+  } else {
+    Serial.println("SamplingTask: Failed to signal buffer ready");
+  }
+
+  Serial.printf("SamplingTask complete (%s)\n", success ? "Success" : "Failed");
+
+  if (xTaskCompleteSemaphore) {
+    xSemaphoreGive(xTaskCompleteSemaphore);
+  }
+
+  esp_task_wdt_delete(NULL);
+  vTaskDelete(NULL);
+}
+void vFFTTask(void* pvParameters) {
+  esp_task_wdt_add(NULL);
+  Serial.println("FFTTask: Subscribed to WDT");
+
+  int rate_data_was_sampled_at = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
+  uint64_t start_time = esp_timer_get_time();
+  Serial.printf("FFTTask started at %llu, rate %d Hz\n", start_time, rate_data_was_sampled_at);
+
+  bool success = true;
+  FFTResult_t fftResult = { 0, 0, rate_data_was_sampled_at };
+
+  Serial.println("FFTTask: Waiting for buffer ready signal");
+  if (xBufferReadySemaphore && xSemaphoreTake(xBufferReadySemaphore, pdMS_TO_TICKS(10000)) == pdPASS) {
+    Serial.println("FFTTask: Received buffer ready signal");
+  } else {
+    Serial.println("FFTTask: Timeout waiting for buffer ready signal!");
+    success = false;
+  }
+
+  if (success) {
+    double* vReal = (double*)malloc(BUFFER_SIZE * sizeof(double));
+    double* vImag = (double*)malloc(BUFFER_SIZE * sizeof(double));
+    ArduinoFFT<double>* FFT = NULL;
+
+    if (!vReal || !vImag) {
+      Serial.println("FFTTask: Memory allocation failed!");
+      if (vReal) free(vReal);
+      if (vImag) free(vImag);
+      success = false;
+    }
+
+    if (success) {
+      FFT = new ArduinoFFT<double>(vReal, vImag, BUFFER_SIZE, (double)current_sample_rate);
+      if (!FFT) {
+        Serial.println("FFTTask: FFT instance creation failed!");
+        free(vReal);
+        free(vImag);
+        success = false;
+      }
+    }
+
+    if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+      BufferState_t read_state = (read_buffer == sample_buffer_1) ? buffer_1_state : buffer_2_state;
+      if (read_state != BUFFER_READY) {
+        Serial.println("FFTTask: Error - Buffer not in READY state!");
+        success = false;
+      } else {
+        // Copy float to double explicitly
+        for (int i = 0; i < BUFFER_SIZE; i++) {
+          vReal[i] = (double)read_buffer[i];
+          vImag[i] = 0.0;
+        }
+      }
+      xSemaphoreGive(xSampleBufferMutex);
+    } else if (success) {
+      Serial.println("FFTTask: Buffer mutex timeout!");
+      success = false;
+    }
+
+    if (success) {
+      FFT->windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+      FFT->compute(FFT_FORWARD);
+      FFT->complexToMagnitude();
+
+      // Find dominant frequency
+      double maxMag = 0.0;
+      uint16_t peakIndex = 0;
+
+      for (uint16_t i = 1; i < BUFFER_SIZE / 2; i++) {  // Ignoring bin 0 (DC)
+        if (vReal[i] > maxMag) {
+          maxMag = vReal[i];
+          peakIndex = i;
+        }
+      }
+
+      double max_freq = (peakIndex * current_sample_rate) / BUFFER_SIZE;
+
+      Serial.println("");
+      Serial.print("Maximum Frequency: ");
+      Serial.print(max_freq, 2);
+      Serial.println(" Hz");
+
+      int new_rate = (int)(2.5 * max_freq);
+      new_rate = constrain(new_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
+      if (new_rate != rate_data_was_sampled_at) {
+        Serial.printf("FFTTask: Adjusting rate to %d Hz\n", new_rate);
+      }
+      current_sample_rate = new_rate;
+
+      fftResult.max_frequency = max_freq;
+      fftResult.max_magnitude = maxMag;
+      fftResult.new_sample_rate = current_sample_rate;
+    }
+
+    if (FFT) delete FFT;
+    if (vReal) free(vReal);
+    if (vImag) free(vImag);
+  }
+
+  if (xFFTResultQueue) {
+    if (xQueueOverwrite(xFFTResultQueue, &fftResult) == pdPASS) {
+      Serial.println("FFTTask: Sent result to Aggregate queue");
+    } else {
+      Serial.println("FFTTask: Queue send failed!");
+      success = false;
+    }
+  } else {
+    Serial.println("FFTTask: Queue null!");
+    success = false;
+  }
+
+  Serial.printf("FFTTask complete (%s)\n", success ? "Success" : "Failed");
+
+  if (xTaskCompleteSemaphore) {
+    xSemaphoreGive(xTaskCompleteSemaphore);
+  }
+
+  esp_task_wdt_delete(NULL);
+  vTaskDelete(NULL);
+}
+
+void vAggregateTask(void* pvParameters) {
+  esp_task_wdt_add(NULL);
+  Serial.println("AggregateTask: Subscribed to WDT");
+
+  int rate_data_was_sampled_at = constrain(current_sample_rate, MIN_SAMPLE_RATE, MAX_SAMPLE_RATE);
+  uint64_t start_time = esp_timer_get_time();
+  Serial.printf("AggregateTask started at %llu\n", start_time);
+
+  bool success = true;
+  FFTResult_t fftResult;
+  AggregateResult_t aggResult = { 0, 0, 0 };
+
+  Serial.println("AggregateTask: Waiting for FFT result");
+  if (xFFTResultQueue && xQueueReceive(xFFTResultQueue, &fftResult, pdMS_TO_TICKS(12000)) == pdPASS) {
+    Serial.println("AggregateTask: Received FFT result");
+  } else {
+    Serial.println("AggregateTask: FFT queue timeout!");
+    success = false;
+  }
+
+  if (success) {
+    int num_samples_in_window = rate_data_was_sampled_at * WINDOW_SEC;
+    int num_samples_to_average = min(num_samples_in_window, BUFFER_SIZE);
+
+    if (num_samples_to_average <= 0) {
+      Serial.printf("AggregateTask: Invalid num_samples_to_average (%d)\n", num_samples_to_average);
+      aggResult.mean = 0;
+      aggResult.median = 0;
+      aggResult.mse = 0;
+    } else {
+      float sum = 0;
+      float* temp_buffer = (float*)malloc(num_samples_to_average * sizeof(float));
+      if (!temp_buffer) {
+        Serial.println("AggregateTask: Memory allocation failed for temp buffer!");
+        success = false;
+      }
+
+      if (success && xSampleBufferMutex && xSemaphoreTake(xSampleBufferMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        BufferState_t read_state = (read_buffer == sample_buffer_1) ? buffer_1_state : buffer_2_state;
+        if (read_state != BUFFER_READY) {
+          Serial.println("AggregateTask: Error - Buffer not in READY state!");
+          success = false;
+        } else {
+          int start_index = BUFFER_SIZE - num_samples_to_average;
+          for (int i = 0; i < num_samples_to_average; i++) {
+            temp_buffer[i] = read_buffer[start_index + i];
+            sum += temp_buffer[i];
+          }
+        }
+        xSemaphoreGive(xSampleBufferMutex);
+
+        if (success) {
+          aggResult.mean = sum / num_samples_to_average;
+
+          for (int i = 0; i < num_samples_to_average - 1; i++) {
+            for (int j = 0; j < num_samples_to_average - i - 1; j++) {
+              if (temp_buffer[j] > temp_buffer[j + 1]) {
+                float temp = temp_buffer[j];
+                temp_buffer[j] = temp_buffer[j + 1];
+                temp_buffer[j + 1] = temp;
+              }
+            }
+          }
+          if (num_samples_to_average % 2 == 0) {
+            aggResult.median = (temp_buffer[num_samples_to_average / 2 - 1] + temp_buffer[num_samples_to_average / 2]) / 2.0;
+          } else {
+            aggResult.median = temp_buffer[num_samples_to_average / 2];
+          }
+
+          float sum_squared_error = 0;
+          for (int i = 0; i < num_samples_to_average; i++) {
+            float error = temp_buffer[i] - aggResult.mean;
+            sum_squared_error += error * error;
+          }
+          aggResult.mse = sum_squared_error / num_samples_to_average;
+
+          Serial.print("AggregateTask: Samples: ");
+          for (int i = 0; i < num_samples_to_average; i++) {
+            Serial.print(temp_buffer[i]);
+            Serial.print(" ");
+          }
+          Serial.println();
+        }
+
+        free(temp_buffer);
+      } else {
+        Serial.println("AggregateTask: Buffer mutex timeout!");
+        success = false;
+        aggResult.mean = 0;
+        aggResult.median = 0;
+        aggResult.mse = 0;
+      }
+    }
+
+    if (success && xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+      aggregate_value = aggResult.mean;
+      xSemaphoreGive(xAggregateMutex);
+    } else if (success) {
+      Serial.println("AggregateTask: Aggregate mutex timeout");
+    }
+
+    if (xAggregateQueue) {
+      if (xQueueOverwrite(xAggregateQueue, &aggResult) == pdPASS) {
+        Serial.println("AggregateTask: Sent aggregate results to MQTT queue");
+      } else {
+        Serial.println("AggregateTask: Queue send failed!");
+        success = false;
+      }
+    } else {
+      Serial.println("AggregateTask: Queue null!");
+      success = false;
+    }
+  }
+
+  Serial.printf("AggregateTask complete (%s), Mean = %.2f, Median = %.2f, MSE = %.2f\n",
+                success ? "Success" : "Failed", aggResult.mean, aggResult.median, aggResult.mse);
+
+  if (xTaskCompleteSemaphore) {
+    xSemaphoreGive(xTaskCompleteSemaphore);
+  }
+
+  esp_task_wdt_delete(NULL);
+  vTaskDelete(NULL);
+}
+
+void vMQTTTask(void* pvParameters) {
+  esp_task_wdt_add(NULL);
+  Serial.println("MQTTTask: Subscribed to WDT");
+
+  uint64_t start_time = esp_timer_get_time();
+  Serial.printf("MQTTTask started at %llu\n", start_time);
+
+  bool success = true;
+  AggregateResult_t aggResult = { 0, 0, 0 };
+
+  Serial.println("MQTTTask: Waiting for aggregate values");
+  if (xAggregateQueue) {
+    if (xQueueReceive(xAggregateQueue, &aggResult, pdMS_TO_TICKS(5000)) == pdPASS) {
+      Serial.println("MQTTTask: Received aggregate results");
+      Serial.printf("MQTTTask: Mean=%.2f, Median=%.2f, MSE=%.2f\n", aggResult.mean, aggResult.median, aggResult.mse);
+    } else {
+      Serial.println("MQTTTask: Queue timeout!");
+      success = false;
+    }
+  } else {
+    Serial.println("MQTTTask: Queue null!");
+    success = false;
+  }
+
+  if (success) {
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("MQTTTask: WiFi disconnected, reconnecting...");
+      connect_wifi();
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!client.connected()) {
+        Serial.println("MQTTTask: MQTT disconnected, reconnecting...");
+        reconnect_mqtt();
+      }
+
+      if (client.connected()) {
+        if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+          aggregate_result.mean = aggResult.mean;
+          aggregate_result.median = aggResult.median;
+          aggregate_result.mse = aggResult.mse;
+          xSemaphoreGive(xAggregateMutex);
+          Serial.printf("MQTTTask: Stored Mean=%.2f, Median=%.2f, MSE=%.2f\n",
+                        aggResult.mean, aggResult.median, aggResult.mse);
+          xSemaphoreGive(xMQTTCompleteSemaphore);
+        } else {
+          Serial.println("MQTTTask: Aggregate mutex timeout");
+          success = false;
+        }
+
+        publish_timestamp = esp_timer_get_time();
+        if (sample_timestamp > 0) {
+          uint64_t latency_us = publish_timestamp - sample_timestamp;
+          total_latency_us += latency_us;
+          latency_count++;
+          Serial.printf("MQTTTask: Latency: %llu us\n", latency_us);
+        }
+
+        client.loop();
+      } else {
+        Serial.println("MQTTTask: Not connected.");
+        success = false;
+      }
+    } else {
+      Serial.println("MQTTTask: WiFi not connected.");
+      success = false;
+    }
+  }
+
+  Serial.printf("MQTTTask complete (%s)\n", success ? "Success" : "Failed");
+
+  if (xTaskCompleteSemaphore) {
+    xSemaphoreGive(xTaskCompleteSemaphore);
+  }
+
+  esp_task_wdt_delete(NULL);
+  vTaskDelete(NULL);
+}
+
+void vPerformanceTask(void* pvParameters) {
+  esp_task_wdt_add(NULL);
+  Serial.println("PerformanceTask: Subscribed to WDT");
+
+  uint64_t start_time = esp_timer_get_time();
+  Serial.printf("PerformanceTask started at %llu\n", start_time);
+
+  bool success = true;
+  AggregateResult_t aggResult = { 0, 0, 0 };
+  float avg_latency_ms = latency_count > 0 ? (float)(total_latency_us / latency_count) / 1000.0 : 0;
+
+  Serial.println("PerformanceTask: Waiting for MQTTTask");
+  if (xMQTTCompleteSemaphore && xSemaphoreTake(xMQTTCompleteSemaphore, pdMS_TO_TICKS(5000)) == pdPASS) {
+    Serial.println("PerformanceTask: MQTTTask completed");
+  } else {
+    Serial.println("PerformanceTask: Timeout waiting for MQTTTask!");
+    success = false;
+  }
+
+  if (xAggregateMutex && xSemaphoreTake(xAggregateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    aggResult = aggregate_result;
+    Serial.printf("PerformanceTask: Read Mean=%.2f, Median=%.2f, MSE=%.2f\n",
+                  aggResult.mean, aggResult.median, aggResult.mse);
+    xSemaphoreGive(xAggregateMutex);
+  } else {
+    Serial.println("PerformanceTask: Aggregate mutex timeout");
+    success = false;
+  }
+
+  if (success && WiFi.status() == WL_CONNECTED && client.connected()) {
+    StaticJsonDocument<256> doc;
+    doc["mean"] = round(aggResult.mean);
+    doc["median"] = round(aggResult.median);
+    doc["mse"] = round(aggResult.mse);
+    doc["cycle"] = cycle_count;
+    doc["latency_ms"] = round(avg_latency_ms * 10) / 10.0;
+    doc["rate"] = current_sample_rate;
+    doc["mqtt_bytes"] = mqtt_bytes_sent_total;
+    doc["heap"] = esp_get_free_heap_size();
+
+    char metrics_buffer[256];
+    size_t len = serializeJson(doc, metrics_buffer, sizeof(metrics_buffer));
+
+    if (len > 0) {
+      Serial.printf("PerformanceTask: Publishing JSON: %s\n", metrics_buffer);
+      publish_mqtt_message(MQTT_TOPIC_METRICS, metrics_buffer);
+    } else {
+      Serial.println("PerformanceTask: JSON serialization failed!");
+      success = false;
+    }
+  } else {
+    Serial.println("PerformanceTask: Cannot publish (not connected)");
+    success = false;
+  }
+
+  Serial.printf("PerformanceTask complete (%s)\n", success ? "Success" : "Failed");
+
+  if (xTaskCompleteSemaphore) {
+    xSemaphoreGive(xTaskCompleteSemaphore);
+  }
+
+  esp_task_wdt_delete(NULL);
+  vTaskDelete(NULL);
+}
 
 void enter_deep_sleep() {
   cycle_count++;
