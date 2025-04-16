@@ -14,6 +14,7 @@ This project describes an ESP32-based application for sampling sensor data, perf
   - [Phases of Operation](#phases-of-operation)
   - [Data Flow](#data-flow)
   - [Design Choices and Rationale](#design-choices-and-rationale)
+  - [Demo Output](#demo-output)
   - [Configuration Parameters](#configuration-parameters)
   - [Dependencies](#dependencies)
   - [Error Handling and Reliability](#error-handling-and-reliability)
@@ -214,6 +215,67 @@ Key decisions enhance efficiency and reliability:
    - **Why**: Lightweight IoT protocol.
    - **How**: Publishes to `test.mosquitto.org`.
    - **Example**: JSON enables easy parsing.
+
+## Demo Output
+
+```cpp
+ --- Boot Count: 1 ---
+Wakeup Reason: 0 (Power-On, Reset, or Other)
+Cycle Count: 0
+Current Sample Rate: 2000 Hz
+Configuring Task Watchdog Timer...
+Task WDT Deinitialized (was running).
+Task WDT Initialized.
+Main task added to WDT.
+Sample buffers allocated and initialized.
+Queues created.
+Mutexes and Semaphores created.
+Connecting to WiFi SSID: demo
+....
+WiFi connected!
+IP Address: 192.168.137.91
+Connecting MQTT to test.mosquitto.org:1883...
+MQTT connected!
+FFTTask: Subscribed to WDT
+FFTTask started at 2821393, rate 2000 Hz
+FFTTask: Waiting for buffer ready signal
+SamplingTask started at 2821310, rate 2000 Hz
+AggregateTask: Subscribed to WDT
+AggregateTask started at 2831835
+AggregateTask: Waiting for FFT result
+PerformanceTask: Subscribed to WDT
+PerformanceTask started at 2842169
+PerformanceTask: Waiting for MQTTTask
+--- Setup Complete ---
+
+SamplingTask: Buffer states - Buf1: 1, Buf2: 0
+SamplingTask: Buffer swapped successfully
+SamplingTask: Signaled buffer ready
+FFTTask: Received buffer ready signal
+SamplingTask complete (Success)
+MQTTTask: Subscribed to WDT
+MQTTTask started at 2907832
+MQTTTask: Waiting for aggregate values
+FFTTask: Maximum Frequency 156.00 Hz
+FFTTask: Adjusting rate to 390 Hz
+FFTTask: Sent result to Aggregate queue
+FFTTask complete (Success)
+AggregateTask: Received FFT result
+AggregateTask: Sent aggregate results to MQTT queue
+MQTTTask: Received aggregate results
+MQTTTask: Mean=0.10, Median=0.07, MSE=8.45
+AggregateTask complete (Success), Mean = 0.10, Median = 0.07, MSE = 8.45
+MQTTTask: Stored Mean=0.10, Median=0.07, MSE=8.45
+PerformanceTask: MQTTTask completed
+MQTTTask: Latency: 191306 us
+MQTTTask complete (Success)
+PerformanceTask: Read Mean=0.10, Median=0.07, MSE=8.45
+PerformanceTask: Publishing JSON: {"mean":0,"median":0,"mse":8,"cycle":0,"latency_ms":0,"rate":390,"mqtt_bytes":0,"heap":277520}
+MQTT published to demo/sensor/metrics: {"mean":0,"median":0,"mse":8,"cycle":0,"latency_ms":0,"rate":390,"mqtt_bytes":0,"heap":277520}
+PerformanceTask complete (Success)
+Loop: All tasks completed.
+Cycle 1 finished. Sleeping for 3.00 seconds...
+```
 
 ## Configuration Parameters
 | Constant                  | Value        | Description                                      |
