@@ -295,103 +295,6 @@ void loop() {
   enter_deep_sleep();
 }
 
-void connect_wifi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi already connected.");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    return;
-  }
-
-  Serial.printf("Connecting to WiFi SSID: %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < WIFI_RECONNECT_ATTEMPTS) {
-    delay(1000);
-    Serial.print(".");
-    attempts++;
-    esp_task_wdt_reset();
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected!");
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.printf("WiFi connection failed after %d attempts!\n", attempts);
-  }
-}
-
-void connect_mqtt() {
-  if (!client.connected()) {
-    Serial.printf("Connecting MQTT to %s:%d...\n", MQTT_SERVER, MQTT_PORT);
-    client.setServer(MQTT_SERVER, MQTT_PORT);
-    client.setCallback(mqtt_callback);
-
-    String clientId = String(MQTT_CLIENT_ID) + String((uint32_t)ESP.getEfuseMac(), HEX);
-    if (client.connect(clientId.c_str())) {
-      Serial.println("MQTT connected!");
-    } else {
-      Serial.print("MQTT connection failed, rc=");
-      Serial.println(client.state());
-    }
-  } else {
-    Serial.println("MQTT already connected.");
-  }
-}
-
-void reconnect_mqtt() {
-  int attempts = 0;
-  while (!client.connected() && attempts < MQTT_RECONNECT_ATTEMPTS) {
-    attempts++;
-    Serial.printf("MQTT reconnect attempt %d/%d...\n", attempts, MQTT_RECONNECT_ATTEMPTS);
-    esp_task_wdt_reset();
-
-    String clientId = String(MQTT_CLIENT_ID) + String((uint32_t)ESP.getEfuseMac(), HEX);
-    if (client.connect(clientId.c_str())) {
-      Serial.println("MQTT reconnected!");
-      return;
-    } else {
-      Serial.print("MQTT reconnect failed, rc=");
-      Serial.println(client.state());
-      Serial.println("Retrying in 5 seconds...");
-      long startMillis = millis();
-      while (millis() - startMillis < 5000) {
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(100));
-      }
-    }
-  }
-  if (!client.connected()) {
-    Serial.println("MQTT reconnection failed.");
-  }
-}
-
-void mqtt_callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("MQTT Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  payload[length] = '\0';
-  Serial.println((char*)payload);
-}
-
-void publish_mqtt_message(const char* topic, const char* payload) {
-  if (!client.connected()) {
-    Serial.println("MQTT publish failed: Client not connected.");
-    return;
-  }
-  if (client.publish(topic, payload)) {
-    int bytes = strlen(topic) + strlen(payload);
-    mqtt_bytes_sent_total += bytes;
-    Serial.printf("MQTT published to %s: %s\n", topic, payload);
-  } else {
-    Serial.printf("MQTT publish failed! Topic: %s\n", topic);
-  }
-}
-
 void vSamplingTask(void* pvParameters) {
   esp_task_wdt_add(NULL);
 
@@ -867,4 +770,101 @@ void enter_deep_sleep() {
 
   esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
   esp_deep_sleep_start();
+}
+
+void connect_wifi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi already connected.");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    return;
+  }
+
+  Serial.printf("Connecting to WiFi SSID: %s\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < WIFI_RECONNECT_ATTEMPTS) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+    esp_task_wdt_reset();
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.printf("WiFi connection failed after %d attempts!\n", attempts);
+  }
+}
+
+void connect_mqtt() {
+  if (!client.connected()) {
+    Serial.printf("Connecting MQTT to %s:%d...\n", MQTT_SERVER, MQTT_PORT);
+    client.setServer(MQTT_SERVER, MQTT_PORT);
+    client.setCallback(mqtt_callback);
+
+    String clientId = String(MQTT_CLIENT_ID) + String((uint32_t)ESP.getEfuseMac(), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("MQTT connected!");
+    } else {
+      Serial.print("MQTT connection failed, rc=");
+      Serial.println(client.state());
+    }
+  } else {
+    Serial.println("MQTT already connected.");
+  }
+}
+
+void reconnect_mqtt() {
+  int attempts = 0;
+  while (!client.connected() && attempts < MQTT_RECONNECT_ATTEMPTS) {
+    attempts++;
+    Serial.printf("MQTT reconnect attempt %d/%d...\n", attempts, MQTT_RECONNECT_ATTEMPTS);
+    esp_task_wdt_reset();
+
+    String clientId = String(MQTT_CLIENT_ID) + String((uint32_t)ESP.getEfuseMac(), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("MQTT reconnected!");
+      return;
+    } else {
+      Serial.print("MQTT reconnect failed, rc=");
+      Serial.println(client.state());
+      Serial.println("Retrying in 5 seconds...");
+      long startMillis = millis();
+      while (millis() - startMillis < 5000) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+    }
+  }
+  if (!client.connected()) {
+    Serial.println("MQTT reconnection failed.");
+  }
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("MQTT Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  payload[length] = '\0';
+  Serial.println((char*)payload);
+}
+
+void publish_mqtt_message(const char* topic, const char* payload) {
+  if (!client.connected()) {
+    Serial.println("MQTT publish failed: Client not connected.");
+    return;
+  }
+  if (client.publish(topic, payload)) {
+    int bytes = strlen(topic) + strlen(payload);
+    mqtt_bytes_sent_total += bytes;
+    Serial.printf("MQTT published to %s: %s\n", topic, payload);
+  } else {
+    Serial.printf("MQTT publish failed! Topic: %s\n", topic);
+  }
 }
