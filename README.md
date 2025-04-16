@@ -290,6 +290,8 @@ Power consumption is measured using an INA219 sensor with two ESP32 boards (one 
 
 ![Esp32 Power Consumption Chart](images/power-consumption.png)
 
+Code: [Power Consumption Code](https://github.com/najeh-halawani/IoT-Adaptive-Sampling-MQTT-LoRa/blob/main/power_consumption_measure/power_consumption_measure.ino)
+
 ## Hands-On Walkthrough
 This section guides you through setting up the ESP32 application, visualizing data in Grafana, and preparing for LoRaWAN with TTN.
 
